@@ -23,6 +23,7 @@ from osdagbridge.core.utils.osi_validator import validate_osi_inputs
 from osdagbridge.core.utils.logger import bridge_logger
 from osdagbridge.desktop.ui.utils.custom_widgets import ToolBarWidget
 from osdagbridge.desktop.ui.utils.custom_cursors import pointing_hand_cursor
+from osdagbridge.desktop.ui.utils.cad_parameter_sync import CadParameterSync
 
 class LoggerStdoutRedirector:
     def __init__(self, logger_func, original_stdout=None):
@@ -788,6 +789,11 @@ class CustomWindow(QWidget):
         # This will update the CAD whenever any input field changes
         if hasattr(self.input_dock, 'input_value_changed'):
             self.input_dock.input_value_changed.connect(self.update_cad_from_inputs)        
+
+        # Double-clicking an editable dimension label in the 2D views edits the
+        # parameter through the same input pathway (see utils/cad_parameter_sync.py).
+        self.cad_parameter_sync = CadParameterSync(self.input_dock)
+        self.cad_comp_widget.set_dimension_edit_handler(self.cad_parameter_sync)
             
     # Function for saving input dictionary into an OSI file
     def saveOSI_inputs(self):

@@ -698,6 +698,24 @@ KEY_MP_CB_SPACING                      = "member_properties.cross_bracing_detail
 
 #══════════════MEMBER-PROPERTIES-TAB-KEY-ENDS═══════════════════════════════════════════════════════
 
+#══════════════CAD-DIMENSION-EDITING-KEYS-START════════════════════════════════════════════════════
+# 2D CAD dimension labels that can be edited by double-clicking them.
+# A label is identified by the input key of the parameter it represents.
+#   - EDITABLE: user inputs; editing writes back through the normal input pathway.
+#   - LOCKED:   derived values; double-clicking them never opens an editor.
+CAD_EDITABLE_DIMENSION_KEYS = (
+    KEY_CARRIAGEWAY_WIDTH,
+    KEY_TS_GIRDER_SPACING,
+    KEY_TS_DECK_THICKNESS,
+    KEY_SPAN,
+)
+CAD_LOCKED_DIMENSION_KEYS = (
+    KEY_TS_DECK_OVERHANG,
+    KEY_TS_OVERALL_WIDTH,
+    KEY_MP_CB_SPACING,
+)
+#══════════════CAD-DIMENSION-EDITING-KEYS-END══════════════════════════════════════════════════════
+
 #══════════════LOAD-TAB-KEY-START═════════════════════════════════════════════════════════════════
 
 KEY_LOADING_TAB = "loading.tab"

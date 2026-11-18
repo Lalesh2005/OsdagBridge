@@ -147,6 +147,12 @@ class BridgeDualCADWidget(QWidget):
         )
         self.top_view_widget.update()
     
+    def set_dimension_edit_handler(self, handler):
+        """Enable double-click editing of dimension labels on both 2D views
+        (pass None to disable). See utils/cad_label_editor.py."""
+        self.cross_section_widget.set_dimension_edit_handler(handler)
+        self.top_view_widget.set_dimension_edit_handler(handler)
+
     def update_from_osdag_inputs(self, input_dict):
         """
         Update CAD from OsdagBridge input fields
