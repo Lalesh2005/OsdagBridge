@@ -1,7 +1,8 @@
 import sys
 from PySide6.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLayout, QWidget, QSizeGrip
 from PySide6.QtCore import Qt, QPoint, QEvent
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QPixmap
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 
 # for standalone testing
 # from custom_titlebar import CustomTitleBar

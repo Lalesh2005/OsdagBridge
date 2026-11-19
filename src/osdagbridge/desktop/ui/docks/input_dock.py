@@ -18,7 +18,8 @@ from PySide6.QtWidgets import (
     QDialog, QFrame, QToolButton
 )
 from PySide6.QtCore import Qt, QRegularExpression, QSize, QTimer, QPoint, QEvent, Signal
-from PySide6.QtGui import QDoubleValidator, QRegularExpressionValidator, QIcon, QColor, QBrush
+from PySide6.QtGui import QDoubleValidator, QRegularExpressionValidator, QColor, QBrush
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 
 from osdagbridge.core.utils.common import *
 from osdagbridge.desktop.ui.utils.custom_buttons import DockCustomButton

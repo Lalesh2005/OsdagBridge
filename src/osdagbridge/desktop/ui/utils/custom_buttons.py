@@ -8,7 +8,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtCore import Qt, Signal, QSize, QEvent, QRect, QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QFont, QIcon, QPainter
+from PySide6.QtGui import QFont, QPainter
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 from osdagbridge.desktop.ui.utils.custom_cursors import pointing_hand_cursor
 
 class DockCustomButton(QPushButton):

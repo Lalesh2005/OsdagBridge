@@ -7,7 +7,8 @@ Author: Arushi
 import math
 from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QIcon, QPixmap
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QPixmap
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 from osdagbridge.core.utils.common import *
 from osdagbridge.desktop.ui.utils.cad_label_editor import DimensionEditMixin
 from osdagbridge.desktop.cad.irc5_geometry import (

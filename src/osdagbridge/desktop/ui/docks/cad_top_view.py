@@ -7,7 +7,8 @@ from osdagbridge.core.utils.common import *
 import math
 from PySide6.QtWidgets import QWidget, QPushButton, QScrollArea
 from PySide6.QtCore import Qt, QRectF, QPointF, QTimer, QSize
-from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF, QIcon
+from PySide6.QtGui import QPainter, QPen, QColor, QFont, QBrush, QPolygonF
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 from .cad_cross_section import CrossSectionCADWidget
 from osdagbridge.desktop.ui.utils.cad_label_editor import DimensionEditMixin
 

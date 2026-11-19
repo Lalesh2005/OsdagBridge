@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QPushButton, QGroupBox, QCheckBox, QScrollArea, QFrame, QComboBox,
 )
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QPainter, QPen, QColor
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 
 from osdagbridge.core.utils.common import (
     TYPE_TITLE, TYPE_BUTTON, TYPE_COMBOBOX, TYPE_PERCENT_BAR, TYPE_RADIO_GRID,
@@ -73,8 +74,38 @@ SMALL_LABEL_STYLE = "QLabel { color:#333; font-size:10px; font-weight:normal; ba
 
 
 class NoScrollComboBox(QComboBox):
+    """Combo box for the dock.  The drop-down arrow is painted here with
+    QPainter, so it is always visible - it no longer depends on the QSS
+    ``down-arrow`` SVG resource, which can silently fail to render."""
+
+    _ARROW_SIZE = 18
+
     def wheelEvent(self, event):
         event.ignore()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        s = self._ARROW_SIZE
+        cx = self.width() - 8 - s / 2
+        cy = self.height() / 2
+        enabled = self.isEnabled()
+        col = QColor("#000000") if enabled else QColor("#9e9e9e")
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(QPen(col, 1.4))
+        p.setBrush(Qt.NoBrush)
+        r = s / 2 - 0.7
+        p.drawEllipse(int(cx - r), int(cy - r), int(2 * r), int(2 * r))
+        p.setBrush(col)
+        p.setPen(Qt.NoPen)
+        from PySide6.QtGui import QPolygonF
+        from PySide6.QtCore import QPointF
+        p.drawPolygon(QPolygonF([
+            QPointF(cx - 4.2, cy - 1.6),
+            QPointF(cx + 4.2, cy - 1.6),
+            QPointF(cx, cy + 2.8),
+        ]))
+        p.end()
 
 
 # ── OutputDock ────────────────────────────────────────────────────────────────
@@ -291,7 +322,7 @@ class OutputDock(QWidget):
                 target.addLayout(self._make_checkbox_row(key, label, values, meta))
 
             elif ftype == TYPE_CHECKBOX:
-                cb = QCheckBox(label or "")
+                cb = RichCheckBox(label or "")
                 cb.setObjectName(key)
                 target.addWidget(cb)
             
@@ -436,6 +467,11 @@ class OutputDock(QWidget):
         if default and str(default) in items:
             combo.setCurrentText(str(default))
         apply_field_style(combo)
+        combo.setStyleSheet(combo.styleSheet() + """
+            QComboBox { padding-right: 30px; }
+            QComboBox::drop-down { width: 0px; border: none; }
+            QComboBox::down-arrow { image: none; width: 0px; height: 0px; }
+        """)
         row.addWidget(combo, 1)
         return row
 
@@ -556,7 +592,7 @@ class OutputDock(QWidget):
         options = list(values or [])
         cbs: list[QCheckBox] = []
         for text in options:
-            cb = QCheckBox(str(text))
+            cb = RichCheckBox(str(text))
             cbs.append(cb)
             row.addWidget(cb)
 

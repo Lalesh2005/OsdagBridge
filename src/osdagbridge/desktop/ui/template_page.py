@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtCore import Qt, QFile, QTextStream, Signal, QTimer, QObject, QEvent, QThread
-from PySide6.QtGui import QIcon, QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 
 from osdagbridge.desktop.ui.docks.input_dock import InputDock
 from osdagbridge.desktop.ui.docks.output_dock import OutputDock

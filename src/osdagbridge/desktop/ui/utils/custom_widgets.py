@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QSizePolicy, QRadioButton, QSpinBox, QDoubleSpinBox, QPushButton, QScrollArea, QFrame, QLabel, QHBoxLayout
 )
 from PySide6.QtCore import Qt, QRectF, QRect, QEvent
-from PySide6.QtGui import QColor, QPainterPath, QPen, QFontMetrics, QIcon, QCursor
+from PySide6.QtGui import QColor, QPainterPath, QPen, QFontMetrics, QCursor
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 from osdagbridge.desktop.ui.utils.custom_cursors import pointing_hand_cursor
 
 # =================================================================================
@@ -101,6 +102,48 @@ from PySide6.QtCore import Qt, QSize, QPoint
 #----------------------------------------------------------------------------------
 #   To create a checkbox with text that supports HTML formatting (e.g. subscripts)
 #----------------------------------------------------------------------------------
+
+# Explicit label colour.  QTextDocument falls back to the *system palette* text
+# colour, which is white on a dark macOS/Windows theme -> invisible labels on
+# the white dock.  Always paint rich labels with a fixed dark colour.
+_LABEL_COLOR = "#1a1a1a"
+
+
+def _wrap_label_html(html: str) -> str:
+    return f'<span style="color:{_LABEL_COLOR};">{html}</span>'
+
+
+def _paint_check_indicator(painter, rect, checked: bool, enabled: bool, hovered: bool):
+    """Draw the checkbox box + tick with QPainter (no QSS / SVG / resources),
+    so the checked state is always visible on every platform and theme."""
+    from PySide6.QtCore import QRectF
+    from PySide6.QtGui import QPainterPath, QPen, QColor
+    r = QRectF(rect).adjusted(0.5, 0.5, -0.5, -0.5)
+    if not enabled:
+        border, fill = QColor("#c0c0c0"), QColor("#ececec")
+    elif checked:
+        border, fill = QColor("#6F8A0E"), QColor("#EAF2C8")
+    else:
+        border, fill = (QColor("#90AF13") if hovered else QColor("#333333")), QColor("#ffffff")
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setPen(QPen(border, 1))
+    painter.setBrush(fill)
+    painter.drawRoundedRect(r, 3, 3)
+    if checked:
+        tick = QColor("#90AF13") if enabled else QColor("#9e9e9e")
+        path = QPainterPath()
+        path.moveTo(r.left() + r.width() * 0.22, r.top() + r.height() * 0.54)
+        path.lineTo(r.left() + r.width() * 0.43, r.top() + r.height() * 0.75)
+        path.lineTo(r.left() + r.width() * 0.80, r.top() + r.height() * 0.27)
+        pen = QPen(tick, 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(path)
+    painter.restore()
+
 class RichCheckBox(QCheckBox):
     """QCheckBox whose label may contain HTML (e.g. subscripts).
 
@@ -136,7 +179,7 @@ class RichCheckBox(QCheckBox):
         """Build a QTextDocument from the rich text."""
         doc = QTextDocument()
         doc.setDefaultFont(self.font())
-        doc.setHtml(self._rich_text)
+        doc.setHtml(_wrap_label_html(self._rich_text))
         return doc
 
     def _metrics(self, opt):
@@ -152,6 +195,7 @@ class RichCheckBox(QCheckBox):
         opt = QStyleOptionButton()
         self.initStyleOption(opt)
         ind_w, ind_h, spacing = self._metrics(opt)
+        ind_w, ind_h = max(ind_w, 16), max(ind_h, 16)
         w = ind_w + spacing + int(text_size.width())
         h = max(ind_h, int(text_size.height()))
         return QSize(w + 4, h + 4)
@@ -167,11 +211,14 @@ class RichCheckBox(QCheckBox):
         self.initStyleOption(opt)
         opt.text = ""
         ind_w, ind_h, spacing = self._metrics(opt)
+        ind_w = max(ind_w, 16)
 
         # Indicator: drawn as a primitive in its own rect.  (Drawing the whole
         # CE_CheckBox into an already-offset rect shifted it a second time.)
-        opt.rect = QRect(0, (self.height() - ind_h) // 2, ind_w, ind_h)
-        self.style().drawPrimitive(QStyle.PE_IndicatorCheckBox, opt, painter, self)
+        ind_w, ind_h = max(ind_w, 16), max(ind_h, 16)
+        ind_rect = QRect(0, (self.height() - ind_h) // 2, ind_w, ind_h)
+        _paint_check_indicator(painter, ind_rect, self.isChecked(),
+                               self.isEnabled(), self.underMouse())
 
         doc = self._doc()
         text_x = ind_w + spacing
@@ -381,7 +428,7 @@ class CustomRadioButton(QRadioButton):
     def _doc(self) -> QTextDocument:
         doc = QTextDocument()
         doc.setDefaultFont(self.font())
-        doc.setHtml(self._rich_text)
+        doc.setHtml(_wrap_label_html(self._rich_text))
         return doc
  
     # ── Paint ────────────────────────────────────────────────────────────────
@@ -508,6 +555,9 @@ class ToolBarWidget(QWidget):
         """)
 
         container = QWidget()
+        container.setObjectName("toolbar_container")
+        container.setStyleSheet("QWidget#toolbar_container { background: white; }"
+                                "QLabel { color: #000000; background: transparent; }")
         self.layout = QHBoxLayout(container)
         self.layout.setContentsMargins(5, 0, 5, 0)
         self.layout.setSpacing(6)
@@ -624,16 +674,19 @@ class ToolBarWidget(QWidget):
                 border-radius: 4px;
                 padding-right: 10px; /* space for BOTH buttons */
                 background: #f8f8f8;
+                color: #000000;
                 margin: 0px;
             }
 
             QDoubleSpinBox:hover {
                 border: 1px solid #888;
+                color: #000000;
                 background: #ffffff;
             }
 
             QDoubleSpinBox:focus {
                 border: 1px solid #555;
+                color: #000000;
                 background: #ffffff;
             }
 

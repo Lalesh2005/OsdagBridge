@@ -12,7 +12,8 @@ from __future__ import annotations
 from typing import Callable, List, Optional
 
 from PySide6.QtCore  import Qt, QSize, Signal, QTimer
-from PySide6.QtGui   import QColor, QDoubleValidator, QIcon, QPainter, QPalette, QPen, QPixmap
+from PySide6.QtGui   import QColor, QDoubleValidator, QPainter, QPalette, QPen, QPixmap
+from osdagbridge.desktop.ui.utils.svg_icons import SvgIcon as QIcon  # plugin-independent SVG icons
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,

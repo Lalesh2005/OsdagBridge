@@ -273,6 +273,10 @@ def main():
     # Create the Qt application instance
     app = QApplication(sys.argv)
 
+    # Render SVG icons / QSS arrows without depending on Qt's SVG plugins.
+    from osdagbridge.desktop.ui.utils.svg_icons import install_svg_fallbacks
+    install_svg_fallbacks(app)
+
     # Application-wide icon: taskbar, Alt-Tab, and default window icon.
     icon = _app_icon()
     if not icon.isNull():
