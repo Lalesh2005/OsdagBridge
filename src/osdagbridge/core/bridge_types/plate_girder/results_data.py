@@ -10,10 +10,11 @@ bridge-wrapper dependency.
 
 from __future__ import annotations
 import json
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
 import openseespy.opensees as ops
 
 from .results_data_post_processing import post_process, FORCE_KEEP, DISP_KEEP
@@ -92,6 +93,334 @@ def _build_nodes_members() -> tuple[dict, dict]:
         for e in ops.getEleTags()
     }
     return nodes, members
+
+
+# =============================================================================
+# TRANSVERSE MEMBERS  (end diaphragms + intermediate cross bracings)
+# =============================================================================
+#
+# In the ospgrillage model the transverse members are NOT identified by element
+# number.  They are the elements registered under three named member groups
+# (see ``BridgeGrillageModel.create_model`` in analyser.py):
+#
+#   * ``transverse_slab`` - intermediate transverse grid lines
+#                           (intermediate cross bracings / transverse slab)
+#   * ``start_edge``      - end diaphragm at the start of the span
+#   * ``end_edge``        - end diaphragm at the end of the span
+#
+# The helpers below read those groups through ``model.get_element`` so the
+# mapping always follows the actual model.  Longitudinal groups are queried the
+# same way and subtracted, so a longitudinal element can never be classified as
+# transverse.
+
+TRANSVERSE_MEMBER_GROUPS = ("transverse_slab", "start_edge", "end_edge")
+LONGITUDINAL_MEMBER_GROUPS = (
+    "edge_beam",
+    "exterior_main_beam_1",
+    "exterior_main_beam_2",
+    "interior_main_beam",
+)
+
+_DISP_COMPONENT_ALIASES = {"dx": "x", "dy": "y", "dz": "z"}
+
+
+class TransverseResultsError(ValueError):
+    """Transverse member results cannot be produced (no members / no data)."""
+
+
+def _group_element_tags(model, group_name: str) -> list[int]:
+    """Every element tag registered under one ospgrillage member group.
+
+    Returns ``[]`` (never raises) when the group does not exist in the model.
+    """
+    try:
+        if group_name in TRANSVERSE_MEMBER_GROUPS:
+            # get_element already merges all sub-groups of these members.
+            return [int(e) for e in model.get_element(
+                member=group_name, options="elements")]
+        # Longitudinal members: one z-group per grid line - walk all of them.
+        z_groups = model.common_grillage_element_z_group.get(group_name, [])
+        tags: list[int] = []
+        for k in range(len(z_groups)):
+            tags.extend(int(e) for e in model.get_element(
+                member=group_name, options="elements", z_group_num=k))
+        return tags
+    except Exception:
+        return []
+
+
+def get_member_element_map(model, members: dict | None = None) -> dict:
+    """Classify the model's beam elements as longitudinal or transverse.
+
+    Parameters
+    ----------
+    model : OspGrillage
+        Model whose member groups are queried.
+    members : dict, optional
+        ``{element_tag: [node_i, node_j]}`` of the live OpenSees model.  When
+        given, tags that are not real elements of that model are dropped.
+
+    Returns
+    -------
+    dict ``{"longitudinal": [...], "transverse": [...],
+    "transverse_groups": {group_name: [...]}}`` - sorted tag lists.  The two
+    lists never overlap (an element found in both stays longitudinal).
+    """
+    valid = None if members is None else {int(k) for k in members}
+
+    longitudinal: set[int] = set()
+    for g in LONGITUDINAL_MEMBER_GROUPS:
+        longitudinal.update(_group_element_tags(model, g))
+
+    transverse_groups: dict[str, list[int]] = {}
+    transverse: set[int] = set()
+    for g in TRANSVERSE_MEMBER_GROUPS:
+        tags = set(_group_element_tags(model, g)) - longitudinal
+        if valid is not None:
+            tags &= valid
+        transverse_groups[g] = sorted(tags)
+        transverse.update(tags)
+
+    if valid is not None:
+        longitudinal &= valid
+
+    return {
+        "longitudinal": sorted(longitudinal),
+        "transverse": sorted(transverse),
+        "transverse_groups": transverse_groups,
+    }
+
+
+def get_transverse_element_tags(model, members: dict | None = None) -> list[int]:
+    """Sorted element tags of all transverse members (``[]`` when none)."""
+    return get_member_element_map(model, members)["transverse"]
+
+
+def build_transverse_lines(nodes: dict, members: dict, transverse_tags,
+                           tag_group: dict | None = None) -> list[dict]:
+    """Arrange transverse elements into ordered lines running across the deck.
+
+    Each line is a chain of end-to-end elements sorted by transverse position
+    (z, then x).  Elements of different member groups are never merged into one
+    line (``tag_group`` maps tag -> group name).  Elements whose nodes are
+    unknown are ignored.  A chain is split wherever consecutive elements do not
+    share a node, so a line is always a simple, contiguous path.
+
+    Returns a list of dicts sorted by span position and named ``T1..Tn``::
+
+        {"name", "group", "elements", "reversed", "node_ids", "xs", "ys", "zs"}
+
+    ``reversed[k]`` is True when element ``k`` is stored with its i-node on the
+    higher-z side, i.e. its local i/j ends are swapped w.r.t. the line.
+    """
+    nodes = {int(k): v for k, v in nodes.items()}
+    members = {int(k): v for k, v in members.items()}
+    tag_group = tag_group or {}
+
+    def pos(n):
+        c = nodes[n]
+        return (round(c[2], 6), round(c[0], 6))
+
+    by_group = defaultdict(list)
+    for t in sorted({int(t) for t in transverse_tags}):
+        if t not in members:
+            continue
+        ni, nj = members[t]
+        if ni not in nodes or nj not in nodes:
+            continue
+        by_group[tag_group.get(t, "transverse")].append(t)
+
+    raw_lines = []
+    for group, tags in by_group.items():
+        # connected components over shared nodes
+        parent = {}
+
+        def find(a):
+            while parent.setdefault(a, a) != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for t in tags:
+            ni, nj = members[t]
+            parent[find(ni)] = find(nj)
+        comps = defaultdict(list)
+        for t in tags:
+            comps[find(members[t][0])].append(t)
+
+        for comp in comps.values():
+            oriented = []
+            for t in comp:
+                ni, nj = members[t]
+                rev = pos(ni) > pos(nj)
+                near, far = (nj, ni) if rev else (ni, nj)
+                oriented.append((pos(near), t, near, far, rev))
+            oriented.sort()
+
+            run = []
+            for _, t, near, far, rev in oriented:
+                if run and run[-1][2] != near:      # previous far node != this near node
+                    raw_lines.append((group, run))
+                    run = []
+                run.append((t, near, far, rev))
+            if run:
+                raw_lines.append((group, run))
+
+    lines = []
+    for group, run in raw_lines:
+        node_ids = [r[1] for r in run] + [run[-1][2]]
+        lines.append({
+            "name": "",
+            "group": group,
+            "elements": [r[0] for r in run],
+            "reversed": [r[3] for r in run],
+            "node_ids": node_ids,
+            "xs": [nodes[n][0] for n in node_ids],
+            "ys": [nodes[n][1] for n in node_ids],
+            "zs": [nodes[n][2] for n in node_ids],
+        })
+
+    lines.sort(key=lambda ln: (round(float(np.mean(ln["xs"])), 3),
+                               round(float(np.mean(ln["zs"])), 3)))
+    for i, ln in enumerate(lines, start=1):
+        ln["name"] = f"T{i}"
+    return lines
+
+
+def _find_component(names, wanted: str):
+    for c in names:
+        if str(c).lower() == wanted.lower():
+            return str(c)
+    return None
+
+
+def _summarise(profiles: list[dict]) -> dict:
+    return {
+        p["name"]: {"max": float(np.max(p["values"])),
+                    "min": float(np.min(p["values"]))}
+        for p in profiles
+    }
+
+
+def extract_transverse_force_profiles(ds, lines: list[dict],
+                                      comp_i: str, comp_j: str,
+                                      negate_j: bool = False) -> dict:
+    """Force / moment values at the nodes of every transverse line.
+
+    ``ds`` must already be the slice of ONE load case (``ds_all.sel(Loadcase=
+    lc)``), so the result always belongs to the load case the caller selected -
+    nothing is cached here.
+
+    ``comp_i`` / ``comp_j`` are the ospgrillage component names of the element
+    i- and j-end (e.g. ``"Vy_i"``, ``"Vy_j"``).  The value at each node is the
+    end force of the element end attached to that node, in kN (kNm for
+    moments).  With ``negate_j`` the j-end values are negated - the convention
+    the longitudinal shear diagram applies to its last point.
+
+    Returns ``{"profiles": [...], "summary": {...}, "unit": str,
+    "skipped_elements": [...]}``.  Raises :class:`TransverseResultsError` when
+    nothing can be plotted.
+    """
+    if not lines:
+        raise TransverseResultsError("No transverse members found in the model.")
+    try:
+        da = ds["forces"]
+    except Exception as exc:
+        raise TransverseResultsError(
+            "No member force results are available.") from exc
+
+    arr = np.asarray(da.values, dtype=float)
+    if arr.ndim != 2:
+        raise TransverseResultsError(
+            "Force results must be for a single load case.")
+    eids = [int(e) for e in da.coords["Element"].values]
+    cids = [str(c) for c in da.coords["Component"].values]
+    row = {e: i for i, e in enumerate(eids)}
+
+    col_i = _find_component(cids, comp_i)
+    col_j = _find_component(cids, comp_j)
+    if col_i is None or col_j is None:
+        raise TransverseResultsError(
+            f"Result component {comp_i}/{comp_j} is not available.")
+    ci, cj = cids.index(col_i), cids.index(col_j)
+
+    profiles, skipped = [], []
+    for ln in lines:
+        elems = ln["elements"]
+        missing = [e for e in elems if e not in row]
+        if missing:
+            skipped.extend(elems)          # drop the whole line, never plot a partial one
+            continue
+
+        def end_value(e, use_j):
+            v = arr[row[e], cj if use_j else ci]
+            return -v if (use_j and negate_j) else v
+
+        vals = [end_value(e, rev) for e, rev in zip(elems, ln["reversed"])]
+        vals.append(end_value(elems[-1], not ln["reversed"][-1]))
+        vals = np.asarray(vals, dtype=float) / 1000.0     # N -> kN, Nm -> kNm
+        if not np.all(np.isfinite(vals)):
+            skipped.extend(elems)
+            continue
+        profiles.append({**ln, "values": vals})
+
+    if not profiles:
+        raise TransverseResultsError(
+            "No result data for the transverse members in this load case.")
+    unit = "kNm" if comp_i.upper().startswith(("MX", "MY", "MZ")) else "kN"
+    return {"profiles": profiles, "summary": _summarise(profiles),
+            "unit": unit, "skipped_elements": skipped}
+
+
+def extract_transverse_displacement_profiles(ds, lines: list[dict],
+                                             comp_name: str) -> dict:
+    """Nodal displacement (mm) along every transverse line.
+
+    ``comp_name`` is ``"dx"/"dy"/"dz"`` (or ``"x"/"y"/"z"``).  Sign handling
+    matches the longitudinal deflection diagram (Y and Z are flipped so that
+    sag is positive).  ``ds`` must be a single load case slice.
+    """
+    if not lines:
+        raise TransverseResultsError("No transverse members found in the model.")
+    try:
+        da = ds["displacements"]
+    except Exception as exc:
+        raise TransverseResultsError(
+            "No displacement results are available.") from exc
+
+    arr = np.asarray(da.values, dtype=float)
+    if arr.ndim != 2:
+        raise TransverseResultsError(
+            "Displacement results must be for a single load case.")
+    nids = [int(n) for n in da.coords["Node"].values]
+    cids = [str(c) for c in da.coords["Component"].values]
+    row = {n: i for i, n in enumerate(nids)}
+
+    target = _DISP_COMPONENT_ALIASES.get(comp_name.lower(), comp_name)
+    actual = _find_component(cids, target)
+    if actual is None:
+        raise TransverseResultsError(
+            f"Displacement component '{target}' is not available.")
+    col = cids.index(actual)
+    sign = -1.0 if actual.lower() in ("y", "z") else 1.0
+
+    profiles, skipped = [], []
+    for ln in lines:
+        if any(n not in row for n in ln["node_ids"]):
+            skipped.extend(ln["elements"])
+            continue
+        vals = np.asarray([arr[row[n], col] for n in ln["node_ids"]],
+                          dtype=float) * sign * 1000.0       # m -> mm
+        if not np.all(np.isfinite(vals)):
+            skipped.extend(ln["elements"])
+            continue
+        profiles.append({**ln, "values": vals})
+
+    if not profiles:
+        raise TransverseResultsError(
+            "No displacement data for the transverse members in this load case.")
+    return {"profiles": profiles, "summary": _summarise(profiles),
+            "unit": "mm", "skipped_elements": skipped}
 
 
 def dump_full_data(

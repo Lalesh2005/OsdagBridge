@@ -27,6 +27,7 @@ from osdagbridge.core.bridge_types.plate_girder.plot_generator import (
     FORCE_MAP,
     DISP_MAP,
 )
+from osdagbridge.core.utils.common import TRANSVERSE_MEMBERS_LABEL
 
 # Forces starting with "F" -> shear (SFD); starting with "M" -> moment (BMD)
 _SFD_KEYS  = {k for k in FORCE_MAP if k.startswith("F")}
@@ -172,6 +173,7 @@ class MplPlotWidget(QWidget):
         self._nodes     = {}
         self._members   = {}
         self._edge_dist = 0.0
+        self._transverse_elements = {}
         self._output_dock = None
         self._summary_data = {}
 
@@ -407,12 +409,15 @@ class MplPlotWidget(QWidget):
                     pass
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
-              edge_dist: float = 0.0):
+              edge_dist: float = 0.0, transverse_elements=None):
         self._ds_all    = ds_all
         self._loadcases = list(loadcases)
         self._nodes     = nodes
         self._members   = members
         self._edge_dist = edge_dist
+        # {group: [element tags]} of the transverse members, from
+        # results_data.get_member_element_map (empty when unavailable).
+        self._transverse_elements = transverse_elements or {}
 
         if hasattr(self, '_fig') and self._fig.axes:
             ax = self._fig.axes[0]
@@ -542,19 +547,22 @@ class MplPlotWidget(QWidget):
             self._fig, self._summary_data = build_figure_sfd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                transverse_elements=self._transverse_elements
             )
         elif force_key in _DEFL_KEYS:
             self._fig, self._summary_data = build_figure_deflection(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                transverse_elements=self._transverse_elements
             )
         else:
             self._fig, self._summary_data = build_figure_bmd(
                 ds, force_key, self._nodes, self._members,
                 edge_dist=self._edge_dist, eng_scale=eng_scale,
-                selected_girder=sel_girder
+                selected_girder=sel_girder,
+                transverse_elements=self._transverse_elements
             )
 
         self._attach_figure(self._fig)
@@ -716,6 +724,8 @@ class MplPlotWidget(QWidget):
                 old_azim = self._fig.axes[0].azim
             plt.close(self._fig)
             sel_girder = self._current_member()
+            if sel_girder == TRANSVERSE_MEMBERS_LABEL:
+                sel_girder = "All"   # the mesh view has no per-girder filter for transverse members
             self._fig = build_figure_grillage(self._nodes, self._members, edge_dist=self._edge_dist, selected_girder=sel_girder)
             self._attach_figure(self._fig)
             if self._fig.axes and old_elev is not None and old_azim is not None:

@@ -137,6 +137,10 @@ KEY_ANALYSIS_FORCES           = "analysis.forces"
 KEY_ANALYSIS_DISPLAY_OPTIONS  = "analysis.display_options"
 KEY_ANALYSIS_UTILIZATION      = "analysis.utilization"
 
+# Entry in the Girder Analysis Results "Member" dropdown that selects every
+# transverse member (end diaphragms + intermediate cross bracings) as one group.
+TRANSVERSE_MEMBERS_LABEL      = "Transverse Members"
+
 KEY_STEELDESIGN_MEMBER_ID = "steeldesign.member_id"
 KEY_STEELDESIGN_LOAD_COMBINATION = "steeldesign.load_combination"
 

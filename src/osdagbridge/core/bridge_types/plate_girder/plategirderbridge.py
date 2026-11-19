@@ -3910,6 +3910,25 @@ class PlateGirderBridge:
         """Return (nodes, members) dicts built from the active openseespy model."""
         return build_nodes_members()
 
+    def get_transverse_elements(self) -> dict:
+        """Return ``{group: [element tags]}`` of the transverse members.
+
+        Covers end diaphragms (``start_edge`` / ``end_edge``) and intermediate
+        cross bracings (``transverse_slab``), read from the ospgrillage member
+        groups via results_data.  ``{}`` when the model is unavailable.
+        """
+        from osdagbridge.core.bridge_types.plate_girder.results_data import (
+            get_member_element_map,
+        )
+        model = getattr(self.grillage_model, "model", None)
+        if model is None:
+            return {}
+        try:
+            _, members = self.get_nodes_members()
+            return get_member_element_map(model, members)["transverse_groups"]
+        except Exception:
+            return {}
+
     def get_edge_dist(self) -> float:
         """Return the deck overhang distance (0.0 when no overhang)."""
         return self.output_dict.get(KEY_TS_DECK_OVERHANG) or 0.0

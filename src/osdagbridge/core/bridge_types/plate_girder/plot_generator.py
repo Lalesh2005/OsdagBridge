@@ -18,6 +18,16 @@ try:
 except ImportError:
     _MPLCURSORS = False
 
+from collections.abc import Mapping
+
+from osdagbridge.core.utils.common import TRANSVERSE_MEMBERS_LABEL
+from .results_data import (
+    TransverseResultsError,
+    build_transverse_lines,
+    extract_transverse_displacement_profiles,
+    extract_transverse_force_profiles,
+)
+
 # Force component map
 FORCE_MAP = {
     "Fx": ("Vx_i", "Vx_j"),
@@ -650,10 +660,18 @@ def build_figure_grillage(nodes, members, edge_dist=0.0, selected_girder="All"):
 # SFD PLOT
 # =============================================================================
 
-def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All",
+                     transverse_elements=None):
     """
     Build a 3-D matplotlib figure showing the Shear Force Diagram.
     """
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL:
+        # Transverse members are not girders: draw them with the shared
+        # transverse-member diagram (data comes from results_data.py).
+        return build_figure_transverse(
+            ds, force_key, nodes, members, transverse_elements,
+            edge_dist=edge_dist, eng_scale=eng_scale)
+
     v_scale = _value_plot_scale(eng_scale)
     comp_i_name, comp_j_name = FORCE_MAP[force_key]
     disp_key = FORCE_DISPLAY.get(force_key, force_key)
@@ -897,7 +915,8 @@ def build_figure_sfd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
 # BMD PLOT
 # =============================================================================
 
-def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All",
+                     transverse_elements=None):
     """
     Build a 3-D matplotlib figure showing the Bending Moment Diagram.
 
@@ -917,6 +936,13 @@ def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
     fig          : matplotlib.figure.Figure
     summary_data : dict  — {girder_name: {"max": float, "min": float}}
     """
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL:
+        # Transverse members are not girders: draw them with the shared
+        # transverse-member diagram (data comes from results_data.py).
+        return build_figure_transverse(
+            ds, force_key, nodes, members, transverse_elements,
+            edge_dist=edge_dist, eng_scale=eng_scale)
+
     v_scale = _value_plot_scale(eng_scale)
     comp_i_name, comp_j_name = FORCE_MAP[force_key]
     disp_key = FORCE_DISPLAY.get(force_key, force_key)
@@ -1287,10 +1313,18 @@ def build_figure_bmd(ds, force_key, nodes, members, edge_dist=0.0, eng_scale=1.0
 # DEFLECTION PLOT
 # =============================================================================
 
-def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All"):
+def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_scale=1.0, selected_girder="All",
+                            transverse_elements=None):
     """
     Build a 3-D matplotlib figure showing the Deflection Diagram.
     """
+    if selected_girder == TRANSVERSE_MEMBERS_LABEL:
+        # Transverse members are not girders: draw them with the shared
+        # transverse-member diagram (data comes from results_data.py).
+        return build_figure_transverse(
+            ds, disp_key, nodes, members, transverse_elements,
+            edge_dist=edge_dist, eng_scale=eng_scale)
+
     v_scale = _value_plot_scale(eng_scale)
     comp_name  = DISP_MAP[disp_key]
     disp_label = DISP_DISPLAY.get(disp_key, disp_key)
@@ -1549,6 +1583,249 @@ def build_figure_deflection(ds, disp_key, nodes, members, edge_dist=0.0, eng_sca
     ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
     _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
     ax.set_axis_off()
+    return fig, summary_data
+
+
+# =============================================================================
+# TRANSVERSE MEMBERS PLOT  (end diaphragms + intermediate cross bracings)
+# =============================================================================
+
+def _transverse_tag_inputs(transverse_elements):
+    """Accept ``{group: [tags]}`` or a flat iterable of tags."""
+    if transverse_elements is None:
+        return [], {}
+    if isinstance(transverse_elements, Mapping):
+        tags, tag_group = [], {}
+        for group, group_tags in transverse_elements.items():
+            for t in group_tags:
+                tags.append(int(t))
+                tag_group[int(t)] = group
+        return tags, tag_group
+    return [int(t) for t in transverse_elements], {}
+
+
+def _transverse_message_figure(title, message):
+    """Figure shown when no transverse data can be plotted (never raises)."""
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    ax.set_axis_off()
+    fig.text(0.5, 0.5, message, ha="center", va="center",
+             fontsize=12, color="#B71C1C")
+    return fig
+
+
+def build_figure_transverse(ds, key, nodes, members, transverse_elements,
+                            edge_dist=0.0, eng_scale=1.0):
+    """
+    Build the 3-D diagram of the transverse members (end diaphragms and
+    intermediate cross bracings) for ONE load case.
+
+    This is the "Transverse Members" entry of the analysis Member dropdown.  It
+    is reached from build_figure_sfd / build_figure_bmd / build_figure_deflection
+    so the existing component radio buttons, load-case dropdown, scale, toggles
+    and summary overlay keep working unchanged.
+
+    Parameters
+    ----------
+    ds : xarray.Dataset
+        Results of the selected load case (``ds_all.sel(Loadcase=lc)``).
+    key : str
+        A FORCE_MAP key (``Fx..Mz``) or a DISP_MAP key (``Dx..Dz``).
+    transverse_elements : dict | iterable
+        ``{group: [element tags]}`` or a flat list of tags, as produced by
+        ``results_data.get_member_element_map``.
+
+    Returns
+    -------
+    (fig, summary_data) - ``summary_data`` is ``{line_name: {"max", "min"}}``;
+    it is ``{}`` (and the figure shows a message) when nothing can be plotted.
+    """
+    v_scale = _value_plot_scale(eng_scale)
+    is_force = key in FORCE_MAP
+    is_disp = key in DISP_MAP
+    if is_force:
+        label = FORCE_DISPLAY.get(key, key)
+        diagram = "Shear Force Diagram" if key.startswith("F") else "Bending Moment Diagram"
+    elif is_disp:
+        label = DISP_DISPLAY.get(key, key)
+        diagram = "Deflection Diagram"
+    else:
+        return (_transverse_message_figure(
+            "Transverse Members", f"Unknown result component '{key}'."), {})
+    title = f"Transverse Members  \u2014  {diagram}  \u2014  {label}"
+
+    try:
+        tags, tag_group = _transverse_tag_inputs(transverse_elements)
+        lines = build_transverse_lines(nodes, members, tags, tag_group)
+        if is_force:
+            comp_i, comp_j = FORCE_MAP[key]
+            data = extract_transverse_force_profiles(
+                ds, lines, comp_i, comp_j, negate_j=key.startswith("F"))
+        else:
+            data = extract_transverse_displacement_profiles(ds, lines, DISP_MAP[key])
+    except TransverseResultsError as exc:
+        return _transverse_message_figure(title, str(exc)), {}
+    except Exception as exc:                    # defensive: never crash the UI
+        return _transverse_message_figure(
+            title, f"Transverse member results are unavailable ({exc})."), {}
+
+    profiles, unit = data["profiles"], data["unit"]
+    summary_data = data["summary"]
+
+    is_moment = is_force and not key.startswith("F")
+    if is_disp:
+        line_color, fill_color = "#6A1B9A", "#CE93D8"
+    elif is_moment:
+        line_color, fill_color = "#C62828", "#EF9A9A"
+    else:
+        line_color, fill_color = "#1565C0", "#90CAF9"
+    base_color = "#388E3C"
+    standard_gray = "#455A64"
+
+    fig = Figure(figsize=(14, 6), dpi=110, facecolor="white")
+    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+
+    all_xs = [c[0] for c in nodes.values()]
+    all_zs = [c[2] for c in nodes.values()]
+    x_range = max(all_xs) - min(all_xs) or 1.0
+    z_range = max(all_zs) - min(all_zs) or 1.0
+    x_pad = x_range * 0.05
+    z_pad = z_range * 0.05
+    ax.set_xlim(min(all_xs) - x_pad, max(all_xs) + x_pad)
+    ax.set_ylim(min(all_zs) - z_pad, max(all_zs) + z_pad)
+    ax.set_box_aspect([x_range, z_range, x_range * 0.30])
+
+    # faint grillage for context (girder lines); the transverse baselines are
+    # drawn below with the diagram itself
+    _add_grillage_background(
+        ax, nodes, members,
+        show_transverse=False,
+        include_edge_longitudinals=True,
+        include_end_transverse=False,
+        show_inner_nodes=False,
+    )
+
+    _scatter_objs, _scatter_data = [], {}
+    global_vmin = global_vmax = 0.0
+
+    for idx_line, prof in enumerate(profiles):
+        xs = np.asarray(prof["xs"], dtype=float)
+        zs = np.asarray(prof["zs"], dtype=float)
+        vals = np.asarray(prof["values"], dtype=float)
+        name = prof["name"]
+
+        # sign convention shared with the longitudinal diagrams:
+        # bending/torsion plot with the positive value downward
+        y_plot = (-vals if is_moment else vals) * v_scale
+        global_vmin = min(global_vmin, float(np.min(y_plot)))
+        global_vmax = max(global_vmax, float(np.max(y_plot)))
+
+        ax.plot(xs, zs, np.zeros_like(xs), color=base_color, linewidth=1.0,
+                alpha=0.4, zorder=3)
+        ax.scatter(xs, zs, np.zeros_like(xs), color=base_color, s=5, zorder=4,
+                   depthshade=False, alpha=0.4)
+        ax.text(xs[0] - (x_range * 0.01), zs[0] - (z_range * 0.02), 0, name,
+                color="black", fontsize=11, ha="right", va="center",
+                zorder=100 - idx_line, gid="girder_labels")
+
+        if key.startswith("F"):
+            # shear / axial: constant per element -> step diagram (as SFD)
+            x_c = np.repeat(xs, 2)[1:-1]
+            z_c = np.repeat(zs, 2)[1:-1]
+            y_c = np.repeat(y_plot[:-1], 2)
+        else:
+            x_c, z_c, y_c = xs, zs, y_plot
+        if len(x_c) >= 2:
+            ax.plot_surface(
+                np.vstack([x_c, x_c]), np.vstack([z_c, z_c]),
+                np.vstack([np.zeros_like(y_c), y_c]),
+                color=fill_color, alpha=0.25, linewidth=0, antialiased=False,
+                zorder=2)
+        ax.plot(x_c, z_c, y_c, color=line_color, linewidth=2.0, zorder=4)
+        for xi, zi, yi in zip(xs, zs, y_plot):
+            ax.plot([xi, xi], [zi, zi], [0, yi], color=line_color,
+                    linewidth=1.0, alpha=0.6, zorder=3)
+
+        sc = ax.scatter(xs, zs, y_plot, color=line_color, s=30, zorder=5,
+                        depthshade=False)
+        _scatter_objs.append(sc)
+        _scatter_data[id(sc)] = (prof["node_ids"], zs, vals)
+
+        i_max, i_min = int(np.argmax(vals)), int(np.argmin(vals))
+        fmt = "{:.3f}" if (is_disp or key.startswith("F")) else "{:.2f}"
+        for tag, i_ex, color in (("max_line", i_max, "#FF4136"),
+                                 ("min_line", i_min, "#0074D9")):
+            ax.plot([xs[i_ex]] * 2, [zs[i_ex]] * 2, [0, y_plot[i_ex]],
+                    color=color, linewidth=1.5, linestyle="--", zorder=3, gid=tag)
+            ax.text(xs[i_ex], zs[i_ex], y_plot[i_ex],
+                    f" {fmt.format(vals[i_ex])} {unit}", color="#333333",
+                    fontsize=8, fontweight="bold", zorder=6, gid=tag,
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.0))
+        for j in range(len(xs)):
+            if j in (i_max, i_min) or abs(vals[j]) <= 1e-4:
+                continue
+            ax.text(xs[j], zs[j], y_plot[j], f" {fmt.format(vals[j])} {unit}",
+                    color=standard_gray, fontsize=7, zorder=5, gid="all_vals",
+                    ha="left" if j % 2 == 0 else "right",
+                    va="bottom" if j % 2 == 0 else "top",
+                    bbox=dict(boxstyle="round,pad=0.1", facecolor="white",
+                              alpha=0.7, edgecolor="none"))
+
+    if _MPLCURSORS and _scatter_objs:
+        cursor = mplcursors.cursor(_scatter_objs, hover=True)
+        fig._custom_cursor = cursor
+        fig._hover_timers = {}
+
+        @cursor.connect("add")
+        def on_add(sel, _data=_scatter_data, _fk=label, _unit=unit):
+            nids, zs_g, vals_g = _data[id(sel.artist)]
+            idx = sel.index
+            sel.annotation.set_text(
+                f"Node {nids[idx]}\nZ: {zs_g[idx]:.2f}\n{_fk}: {vals_g[idx]:.3f} {_unit}")
+            sel.annotation.get_bbox_patch().set(fc="white", alpha=0.9, edgecolor="#BBBBBB")
+            sel_id = id(sel)
+            if sel_id in fig._hover_timers:
+                fig._hover_timers[sel_id].stop()
+            timer = fig.canvas.new_timer(interval=3000)
+            timer.single_shot = True
+            fig._hover_timers[sel_id] = timer
+
+            def auto_hide():
+                try:
+                    sel.annotation.set_visible(False)
+                    fig.canvas.draw_idle()
+                except Exception:
+                    pass
+                finally:
+                    fig._hover_timers.pop(sel_id, None)
+
+            timer.add_callback(auto_hide)
+            timer.start()
+
+    _add_node_number_labels(ax, nodes)
+    _add_element_number_labels(ax, nodes, members)  # hidden by default; toggled by toolbar
+    ax.set_xlabel("Span Length (m)", fontsize=10, labelpad=8)
+    ax.set_ylabel("Bridge Width (m)", fontsize=10, labelpad=8)
+    ax.set_zlabel(f"{label} ({unit})", fontsize=10, labelpad=8)
+    _set_value_axis_tick_formatter(ax, v_scale)
+    zmin, zmax = min(0.0, global_vmin), max(0.0, global_vmax)
+    pad = max(1e-6, 0.05 * max(1e-9, zmax - zmin))
+    ax.set_zlim(zmin - pad, zmax + pad)
+    ax.set_box_aspect([x_range, z_range, (x_range * 0.30) * max(v_scale, 1e-6)])
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    fig._eng_scale = v_scale
+    ax.view_init(elev=DEFAULT_ELEV, azim=DEFAULT_AZIM)
+    for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
+        pane.fill = False
+        pane.set_edgecolor("#555555")
+        pane.set_linewidth(1.5)
+        pane.set_alpha(1.0)
+    ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.5)
+    _add_coordinate_triad(ax, nodes, eng_scale=v_scale)
+    ax.set_axis_off()
+
     return fig, summary_data
 
 
