@@ -2,12 +2,15 @@
 Additional Inputs Widget for Highway Bridge Design
 Provides detailed input fields for manual bridge parameter definition
 """
+import html
+import re
+from contextlib import contextmanager
 from copy import deepcopy
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTabWidget, QTabBar, QLabel, QLineEdit,
     QComboBox, QPushButton, QCheckBox, QSizePolicy,
-    QDialog, QSizePolicy, QSizeGrip,
+    QDialog, QSizePolicy, QSizeGrip, QRadioButton, QStackedWidget,
 )
 from PySide6.QtCore import Qt, Signal, QTimer, QPoint, QEvent
 from PySide6.QtGui import QDoubleValidator
@@ -58,6 +61,13 @@ class AdditionalInputs(QDialog):
         # Store all Compute functions to be called at Design
         self._compute_functions = []
 
+        # Unsaved-changes tracking.  is_modified becomes True only through a real user
+        # edit and is cleared by a successful Save or by (re)loading the dialog.
+        self.is_modified = False
+        self._loading_depth = 0          # >0 while the dialog is being populated programmatically
+        self._modified_baseline = {}     # widget -> value at last load/save, to ignore no-op edits
+        self._allow_reject = False       # True only while closeEvent hands over to QDialog.reject
+
         self.setObjectName("AdditionalInputs")
         self.setMinimumSize(900, 520)
         
@@ -77,6 +87,8 @@ class AdditionalInputs(QDialog):
                 border: 1px solid #90AF13;
             }
         """)
+        self._wire_modification_tracking()
+        self._reset_modified_state()
 
     def setupWrapper(self):  # setup: frameless window wrapper with custom title bar and size grip
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowSystemMenuHint)
@@ -155,7 +167,7 @@ class AdditionalInputs(QDialog):
         main_layout.addWidget(self.tabs)
 
         action_bar, self.defaults_button, self.save_button = create_action_button_bar()
-        self.defaults_button.clicked.connect(self.reset_active_tab_defaults)
+        self.defaults_button.clicked.connect(self._on_defaults_clicked)
 
         from pprint import pprint
         self.defaults_button.clicked.connect(lambda: pprint(self.working_input_dict))
@@ -228,7 +240,13 @@ class AdditionalInputs(QDialog):
             return True
         return super().eventFilter(obj, event)
 
-    def set_input_dictionary(self, input_dict: dict):  # lifecycle: sets default/working dicts and wires END_CONNECTORS on first open
+    def set_input_dictionary(self, input_dict: dict):  # lifecycle: loads the dialog programmatically; the result is the clean (unmodified) state
+        with self._programmatic_update():
+            self._load_input_dictionary(input_dict)
+        self._wire_modification_tracking()
+        self._reset_modified_state()
+
+    def _load_input_dictionary(self, input_dict: dict):  # lifecycle: sets default/working dicts and wires END_CONNECTORS on first open
         self.default_input_dict = input_dict
         self.working_input_dict = deepcopy(input_dict)
 
@@ -300,7 +318,12 @@ class AdditionalInputs(QDialog):
             mode = str(self.working_input_dict.get(ctrl_id) or "")
             adaptive.switch_mode(mode)
 
-    def design_mode_trigger(self, mode_str: str):  # lifecycle: syncs Optimized/Custom mode across all affected widgets and AdaptiveWidgets
+    def design_mode_trigger(self, mode_str: str):  # lifecycle: syncs Optimized/Custom mode across all affected widgets (programmatic, never marks the dialog modified)
+        with self._programmatic_update():
+            self._design_mode_trigger(mode_str)
+        self._capture_modified_baseline()
+
+    def _design_mode_trigger(self, mode_str: str):
         # Ensures IS Section hidden and welded fields shown correctly on first open
         gd_type_w = self.findChild(QComboBox, KEY_MP_GIRDER_TYPE)
         if gd_type_w:
@@ -499,6 +522,7 @@ class AdditionalInputs(QDialog):
 
     def showEvent(self, event):  # Qt event: refreshes active sub-tabs when dialog is shown or reopened
         super().showEvent(event)
+        self._wire_modification_tracking()
         from PySide6.QtWidgets import QTabWidget
         for tab_widget in self.findChildren(QTabWidget):
             if hasattr(tab_widget, "refresh_active_tab"):
@@ -507,6 +531,18 @@ class AdditionalInputs(QDialog):
     # ── Dialog Persistence ───────────────────────────────────────────────────────
 
     def _save_inputs(self):  # on_change: validates all tabs then commits working_input_dict and emits CAD update signal
+
+        # Pre-save validation: nothing below runs (and no state changes) if a parameter
+        # set to Custom has an empty custom value.
+        missing = self._find_empty_custom_value()
+        if missing is not None:
+            CustomMessageBox(
+                title="Error",
+                text=f"Error: The custom value for '{missing}' cannot be empty.",
+                buttons=["OK"],
+                dialogType=MessageBoxType.Critical,
+            ).exec()
+            return
 
         # Flush the currently-displayed stiffener member's widgets before committing.
         # _save_stiffener_member_data otherwise only runs when switching *away* from a
@@ -521,7 +557,10 @@ class AdditionalInputs(QDialog):
         cad = self.findChild(CrossSectionCADWidget, KEY_TS_CAD_PREVIEW)
         if cad:
             self.update_template_page_2d_cad.emit(cad.params)
-        
+
+        # Saved: this is the new clean state (done before the modal box so it cannot be missed).
+        self._reset_modified_state()
+
         CustomMessageBox(
             title="Saved",
             text="Inputs saved successfully.",
@@ -538,6 +577,218 @@ class AdditionalInputs(QDialog):
             dialogType=MessageBoxType.Warning,
         ).exec()
 
+    # ── Custom-Value Validation ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _clean_label(text: str) -> str:  # utility: plain parameter name from a rich-text field label ("Gust Factor, G:" -> "Gust Factor, G")
+        text = html.unescape(re.sub(r"<[^>]+>", "", text or ""))
+        text = re.sub(r"\s*\([^)]*\)\s*:?\s*$", "", text)   # trailing "(unit)"
+        return text.strip().rstrip(":").strip()
+
+    def _tab_pages(self, widget: QWidget) -> list:  # utility: [(QTabWidget, page index)] of every tab page holding widget, innermost first
+        pages = []
+        node = widget
+        while node is not None and node is not self:
+            parent = node.parentWidget()
+            tab_widget = parent.parentWidget() if isinstance(parent, QStackedWidget) else None
+            if isinstance(tab_widget, QTabWidget):
+                idx = tab_widget.indexOf(node)
+                if idx >= 0:
+                    pages.append((tab_widget, idx))
+            node = parent
+        return pages
+
+    def _enclosing_tab_title(self, widget: QWidget) -> str:  # utility: title of the innermost tab page that contains widget
+        pages = self._tab_pages(widget)
+        return pages[0][0].tabText(pages[0][1]).strip() if pages else ""
+
+    def _is_in_active_tab(self, widget: QWidget) -> bool:  # utility: False if widget, or any tab page holding it, is disabled/hidden
+        """
+        Non-current pages of a tab/stack are hidden by Qt itself, so that is not a reason
+        to skip a widget: only disabled tabs and explicitly hidden widgets are.
+        """
+        node = widget
+        while node is not None and node is not self:
+            parent = node.parentWidget()
+            if isinstance(parent, QStackedWidget):
+                tab_widget = parent.parentWidget()
+                if isinstance(tab_widget, QTabWidget):
+                    idx = tab_widget.indexOf(node)
+                    if idx >= 0 and not tab_widget.isTabEnabled(idx):
+                        return False
+            elif node.isHidden():
+                return False
+            node = parent
+        return True
+
+    def _selector_is_custom(self, selector_key: str) -> bool:  # utility: True if the parameter's current selection is Custom
+        combo = self.findChild(QComboBox, selector_key)
+        if combo is not None:
+            return (self._is_in_active_tab(combo)
+                    and combo.currentText().strip() == VALUE_CUSTOM)
+        # Selector is not a widget of this dialog (e.g. the design mode set in the input dock).
+        return str(self.working_input_dict.get(selector_key) or "").strip() == VALUE_CUSTOM
+
+    def _custom_value_specs(self) -> list:  # utility: [(parameter name, selector key, value QLineEdit)] in UI order
+        """
+        Built from ADDITIONAL_INPUT_CUSTOM_VALUE_FIELDS (central keys).  Names come from the
+        field labels; a name shared by several fields is prefixed with its sub-tab title.
+        """
+        # Widget creation order does not follow tab order, so order by tab position first.
+        creation_order = {w: i for i, w in enumerate(self.findChildren(QWidget))}
+
+        def ui_order(edit):
+            path = tuple(idx for _, idx in reversed(self._tab_pages(edit)))   # outermost tab first
+            return path, creation_order.get(edit, 0)
+
+        specs = []
+        for selector_key, value_key in ADDITIONAL_INPUT_CUSTOM_VALUE_FIELDS:
+            edit = self.findChild(QLineEdit, value_key)
+            if edit is None:
+                continue
+            name = value_key
+            # The label sits under the field id; mode+value pairs share one label under the
+            # id without the ".mode"/".value" suffix.
+            for label_key in (value_key, selector_key, value_key.rpartition(".")[0]):
+                label = self.findChild(QLabel, label_key + "_label")
+                if label is not None and self._clean_label(label.text()):
+                    name = self._clean_label(label.text())
+                    break
+            specs.append([name, selector_key, edit])
+        counts = {}
+        for name, _, _ in specs:
+            counts[name] = counts.get(name, 0) + 1
+        for spec in specs:
+            if counts[spec[0]] > 1:
+                title = self._enclosing_tab_title(spec[2])
+                if title:
+                    spec[0] = f"{title} {spec[0]}"
+        specs.sort(key=lambda spec: ui_order(spec[2]))
+        return [tuple(spec) for spec in specs]
+
+    def _find_empty_custom_value(self):  # validation: first active parameter set to Custom whose value is empty/whitespace (name), else None
+        for name, selector_key, edit in self._custom_value_specs():
+            if not self._is_in_active_tab(edit):
+                continue
+            if not self._selector_is_custom(selector_key):
+                continue
+            if not edit.text().strip():
+                return name
+        return None
+
+    # ── Unsaved-Changes Tracking ─────────────────────────────────────────────────
+
+    _MODIFIED_TRACKED_PROP = "_osdag_modified_tracked"
+
+    @contextmanager
+    def _programmatic_update(self):  # utility: changes made inside this block are never "user modifications"
+        self._loading_depth += 1
+        try:
+            yield
+        finally:
+            self._loading_depth -= 1
+
+    @staticmethod
+    def _widget_value(widget: QWidget):  # utility: the value a tracked input widget currently holds
+        if isinstance(widget, QLineEdit):
+            return widget.text()
+        if isinstance(widget, QComboBox):
+            return widget.currentText()
+        return widget.isChecked()
+
+    def _mark_modified(self) -> None:  # on_change: records a real user change (ignored while loading)
+        if self._loading_depth == 0:
+            self.is_modified = True
+
+    def _on_user_edit(self, widget: QWidget) -> None:  # on_change: a user-driven signal fired on an input widget
+        if self._loading_depth:
+            return
+        if self._modified_baseline.get(widget, object()) == self._widget_value(widget):
+            return  # e.g. the same combo item picked again: nothing actually changed
+        self.is_modified = True
+
+    def _wire_modification_tracking(self) -> None:  # setup: connects user-only signals of every input widget once
+        """
+        Uses signals Qt emits only for user actions (textEdited, activated, clicked), so
+        programmatic setText/setCurrentText never marks the dialog modified.  Safe to call
+        repeatedly: a property on each widget prevents duplicate connections.
+        """
+        for widget in self.tabs.findChildren(QWidget):   # tab area only: Save/Defaults are excluded
+            if widget.property(self._MODIFIED_TRACKED_PROP):
+                continue
+            if isinstance(widget, QLineEdit):
+                widget.textEdited.connect(lambda _t, w=widget: self._on_user_edit(w))
+            elif isinstance(widget, QComboBox):
+                widget.activated.connect(lambda _i, w=widget: self._on_user_edit(w))
+            elif isinstance(widget, (QCheckBox, QRadioButton)):
+                widget.clicked.connect(lambda _c, w=widget: self._on_user_edit(w))
+            else:
+                continue
+            widget.setProperty(self._MODIFIED_TRACKED_PROP, True)
+
+    def _capture_modified_baseline(self) -> None:  # utility: remembers current widget values as the "saved" state
+        self._modified_baseline = {
+            w: self._widget_value(w)
+            for w in self.tabs.findChildren(QWidget)
+            if isinstance(w, (QLineEdit, QComboBox, QCheckBox, QRadioButton))
+        }
+
+    def _reset_modified_state(self) -> None:  # lifecycle: current contents become the clean state
+        self._capture_modified_baseline()
+        self.is_modified = False
+
+    def _note_value_change(self, key: str, value) -> None:  # utility: marks modified if a list/dict value differs from the stored one
+        if self.working_input_dict.get(key) != value:
+            self._mark_modified()
+
+    def _on_defaults_clicked(self) -> None:  # on_click: Defaults button — modified only if it really changed something
+        before_values = {w: self._widget_value(w) for w in self._modified_baseline if w.parent() is not None}
+        before_dict = deepcopy(self.working_input_dict)
+        self.reset_active_tab_defaults()
+        after_values = {w: self._widget_value(w) for w in before_values}
+        if after_values != before_values or self.working_input_dict != before_dict:
+            self._mark_modified()
+
+    # ── Close Handling ───────────────────────────────────────────────────────────
+
+    def reject(self):  # Qt: Esc and QDialog.reject() go through close() so the unsaved-changes guard always applies
+        if self._allow_reject:
+            super().reject()
+        else:
+            self.close()
+
+    def closeEvent(self, event):  # Qt event: warns before discarding unsaved changes
+        if self.is_modified:
+            if not self._confirm_discard_changes():
+                event.ignore()      # Cancel / dialog dismissed: stay open, keep values and modified state
+                return
+            self._discard_changes()
+        self._allow_reject = True
+        try:
+            super().closeEvent(event)   # QDialog hides itself via reject()
+        finally:
+            self._allow_reject = False
+
+    def _confirm_discard_changes(self) -> bool:  # utility: standard Osdag warning; True only when the user picks Discard
+        result = CustomMessageBox(
+            title="Unsaved Changes",
+            text="You have unsaved changes. Closing this window will discard them. Do you want to proceed?",
+            buttons=["Discard", "Cancel"],
+            dialogType=MessageBoxType.Warning,
+        ).exec()
+        return result == "Discard"
+
+    def _discard_changes(self) -> None:  # lifecycle: restores the last saved state without saving anything
+        """
+        default_input_dict is only updated by Save, so it is the last saved state.  The
+        dialog is reused between openings, so put it (and the preview) back to that state.
+        """
+        with self._programmatic_update():
+            self.working_input_dict = deepcopy(self.default_input_dict)
+            self.set_defaults()
+            self._update_additional_input_cad()
+        self._reset_modified_state()
+
     # ── Field Change Handling ────────────────────────────────────────────────────
 
     def _on_field_edited(self, key: str, widget: QLineEdit | str | dict):  # on_change: hard-validates and commits a field value after editing finishes
@@ -552,6 +803,7 @@ class AdditionalInputs(QDialog):
             return
 
         if isinstance(widget, dict):
+            self._note_value_change(key, widget)
             self._update_input_dict(key, widget)
             return
 
@@ -561,6 +813,7 @@ class AdditionalInputs(QDialog):
             return
 
         if isinstance(widget, list):
+            self._note_value_change(key, widget)
             self._update_input_dict(key, widget)
             return
 
@@ -1304,7 +1557,9 @@ class AdditionalInputs(QDialog):
         idx = combo.currentIndex()   # 0-based → G1 = index 0
         girder_key = f"{KEY_MP_GD_SEGMENT_TABLE}.G{idx + 1}"
 
+        self._note_value_change(girder_key, segments)
         self.working_input_dict[girder_key] = segments
+        self._wire_modification_tracking()   # segment rows are created dynamically
 
         cad = self.findChild(QWidget, KEY_MP_GD_CAD_PREVIEW)
         cad.update_segments(segments)
@@ -1472,6 +1727,7 @@ class AdditionalInputs(QDialog):
     def _on_all_custom_selected(self, field_id: str, chosen: list) -> None:  # on_change: stores TYPE_ALL_CUSTOM selection list under the current member's dynamic key
         gi, mi = self._get_current_girder_member_indices()
         suffix = f".G{gi}.M{mi}"
+        self._note_value_change(field_id + ".selected" + suffix, chosen)
         self.working_input_dict[field_id + ".selected" + suffix] = chosen
         self.working_input_dict[field_id + suffix] = "Custom"
         print(f"[ALL_CUSTOM_SELECTED] {field_id}.selected{suffix} = {chosen}")
@@ -1490,6 +1746,8 @@ class AdditionalInputs(QDialog):
         targets = {1, count} - {gi}
         for target_g in targets:
             self._copy_girder_properties(gi, target_g)
+        if targets:
+            self._mark_modified()
         print(f"@@: Applied Girder {gi} settings to exterior girders: {targets}")
 
     def _on_apply_interior_clicked(self) -> None:  # on_change: applies current girder settings to all interior girders
@@ -1498,6 +1756,8 @@ class AdditionalInputs(QDialog):
         targets = set(range(2, count)) - {gi}
         for target_g in targets:
             self._copy_girder_properties(gi, target_g)
+        if targets:
+            self._mark_modified()
         print(f"@@: Applied Girder {gi} settings to interior girders: {targets}")
 
     def _on_top_flange_changed(self) -> None:
@@ -1938,6 +2198,7 @@ class AdditionalInputs(QDialog):
                 if target_suffix == source_suffix:
                     continue
                 for key, val in source_values.items():
+                    self._note_value_change(f"{key}{target_suffix}", val)
                     self.working_input_dict[f"{key}{target_suffix}"] = val
 
         # Step 4: Reload to refresh UI with updated values

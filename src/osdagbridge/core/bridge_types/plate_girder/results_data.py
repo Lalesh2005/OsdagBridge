@@ -121,6 +121,10 @@ LONGITUDINAL_MEMBER_GROUPS = (
     "interior_main_beam",
 )
 
+# Line labels shown on the plots: ED = end diaphragm, CB = intermediate cross
+# bracing (numbered along the span).  Anything else is labelled T<n>.
+_LINE_PREFIX = {"start_edge": "ED", "end_edge": "ED", "transverse_slab": "CB"}
+
 _DISP_COMPONENT_ALIASES = {"dx": "x", "dy": "y", "dz": "z"}
 
 
@@ -206,7 +210,8 @@ def build_transverse_lines(nodes: dict, members: dict, transverse_tags,
     unknown are ignored.  A chain is split wherever consecutive elements do not
     share a node, so a line is always a simple, contiguous path.
 
-    Returns a list of dicts sorted by span position and named ``T1..Tn``::
+    Returns a list of dicts sorted by span position and named by role (``ED1, ED2``
+    for end diaphragms, ``CB1..CBn`` for intermediate cross bracings)::
 
         {"name", "group", "elements", "reversed", "node_ids", "xs", "ys", "zs"}
 
@@ -282,8 +287,11 @@ def build_transverse_lines(nodes: dict, members: dict, transverse_tags,
 
     lines.sort(key=lambda ln: (round(float(np.mean(ln["xs"])), 3),
                                round(float(np.mean(ln["zs"])), 3)))
-    for i, ln in enumerate(lines, start=1):
-        ln["name"] = f"T{i}"
+    counters: dict[str, int] = defaultdict(int)
+    for ln in lines:
+        prefix = _LINE_PREFIX.get(ln["group"], "T")
+        counters[prefix] += 1
+        ln["name"] = f"{prefix}{counters[prefix]}"
     return lines
 
 
@@ -302,9 +310,18 @@ def _summarise(profiles: list[dict]) -> dict:
     }
 
 
+# A transverse result whose largest magnitude is below this is reported as
+# "zero" to the user (units: kN, kNm or mm).  It only drives the on-plot notice;
+# the values themselves are never altered.
+NEGLIGIBLE_RESULT = 0.01
+
+
+def _peak_abs(profiles: list[dict]) -> float:
+    return float(max(np.max(np.abs(p["values"])) for p in profiles))
+
+
 def extract_transverse_force_profiles(ds, lines: list[dict],
-                                      comp_i: str, comp_j: str,
-                                      negate_j: bool = False) -> dict:
+                                      comp_i: str, comp_j: str) -> dict:
     """Force / moment values at the nodes of every transverse line.
 
     ``ds`` must already be the slice of ONE load case (``ds_all.sel(Loadcase=
@@ -312,14 +329,25 @@ def extract_transverse_force_profiles(ds, lines: list[dict],
     nothing is cached here.
 
     ``comp_i`` / ``comp_j`` are the ospgrillage component names of the element
-    i- and j-end (e.g. ``"Vy_i"``, ``"Vy_j"``).  The value at each node is the
-    end force of the element end attached to that node, in kN (kNm for
-    moments).  With ``negate_j`` the j-end values are negated - the convention
-    the longitudinal shear diagram applies to its last point.
+    i- and j-end (e.g. ``"Vy_i"``, ``"Vy_j"``); the dataset holds them in the
+    global frame, in N / Nm.
 
-    Returns ``{"profiles": [...], "summary": {...}, "unit": str,
-    "skipped_elements": [...]}``.  Raises :class:`TransverseResultsError` when
-    nothing can be plotted.
+    Node values follow the convention of the longitudinal diagrams, but are
+    decided by *which side of the node the element lies on* rather than by the
+    element's i/j label, so a chain mixing element directions stays continuous:
+
+    * the node an element starts from (first node of the line, and every node
+      between two elements) takes the end force of the element lying ahead of
+      it, as is;
+    * the last node of the line takes the end force of the last element with
+      its sign reversed (the element lies behind that node).
+
+    For equilibrium (no load on the element) the two ends of an element are
+    equal and opposite, so this gives one continuous diagram.
+
+    Returns ``{"profiles", "summary", "unit", "skipped_elements", "peak",
+    "is_zero"}`` with values in kN (kNm).  Raises :class:`TransverseResultsError`
+    when nothing can be plotted.
     """
     if not lines:
         raise TransverseResultsError("No transverse members found in the model.")
@@ -353,11 +381,13 @@ def extract_transverse_force_profiles(ds, lines: list[dict],
             continue
 
         def end_value(e, use_j):
-            v = arr[row[e], cj if use_j else ci]
-            return -v if (use_j and negate_j) else v
+            return arr[row[e], cj if use_j else ci]
 
+        # element lying ahead of the node: the end touching that node is j when
+        # the element is stored against the line direction, otherwise i.
         vals = [end_value(e, rev) for e, rev in zip(elems, ln["reversed"])]
-        vals.append(end_value(elems[-1], not ln["reversed"][-1]))
+        # last node: the last element lies behind it -> opposite end, sign flipped
+        vals.append(-end_value(elems[-1], not ln["reversed"][-1]))
         vals = np.asarray(vals, dtype=float) / 1000.0     # N -> kN, Nm -> kNm
         if not np.all(np.isfinite(vals)):
             skipped.extend(elems)
@@ -368,8 +398,10 @@ def extract_transverse_force_profiles(ds, lines: list[dict],
         raise TransverseResultsError(
             "No result data for the transverse members in this load case.")
     unit = "kNm" if comp_i.upper().startswith(("MX", "MY", "MZ")) else "kN"
+    peak = _peak_abs(profiles)
     return {"profiles": profiles, "summary": _summarise(profiles),
-            "unit": unit, "skipped_elements": skipped}
+            "unit": unit, "skipped_elements": skipped,
+            "peak": peak, "is_zero": peak < NEGLIGIBLE_RESULT}
 
 
 def extract_transverse_displacement_profiles(ds, lines: list[dict],
@@ -419,8 +451,10 @@ def extract_transverse_displacement_profiles(ds, lines: list[dict],
     if not profiles:
         raise TransverseResultsError(
             "No displacement data for the transverse members in this load case.")
+    peak = _peak_abs(profiles)
     return {"profiles": profiles, "summary": _summarise(profiles),
-            "unit": "mm", "skipped_elements": skipped}
+            "unit": "mm", "skipped_elements": skipped,
+            "peak": peak, "is_zero": peak < NEGLIGIBLE_RESULT / 10.0}
 
 
 def dump_full_data(

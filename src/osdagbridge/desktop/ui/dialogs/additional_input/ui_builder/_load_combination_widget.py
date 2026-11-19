@@ -159,6 +159,7 @@ class LoadCombinationWidget(QWidget):
         if idx < len(self._data):
             self._data[idx]["included"] = checked
             if self._ai:
+                self._ai._mark_modified()  # list is edited in place, so a value comparison cannot see this
                 self._ai._on_field_edited(self._field_id, self._data)
 
     # ── Private ────────────────────────────────────────────────────────────

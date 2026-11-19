@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QListView, QStyledItemDelegate, QWidget, QVBoxLayout,
     QSizePolicy, QRadioButton, QSpinBox, QDoubleSpinBox, QPushButton, QScrollArea, QFrame, QLabel, QHBoxLayout
 )
-from PySide6.QtCore import Qt, QRectF, QRect
+from PySide6.QtCore import Qt, QRectF, QRect, QEvent
 from PySide6.QtGui import QColor, QPainterPath, QPen, QFontMetrics, QIcon, QCursor
 from osdagbridge.desktop.ui.utils.custom_cursors import pointing_hand_cursor
 
@@ -102,9 +102,19 @@ from PySide6.QtCore import Qt, QSize, QPoint
 #   To create a checkbox with text that supports HTML formatting (e.g. subscripts)
 #----------------------------------------------------------------------------------
 class RichCheckBox(QCheckBox):
+    """QCheckBox whose label may contain HTML (e.g. subscripts).
+
+    Qt only knows the (empty) native text, so by default its hit-test region
+    stops at the indicator and clicking the label did nothing.  ``hitButton``
+    is therefore overridden to cover the whole widget, and the indicator is
+    drawn with the style (so the shared QSS ``::indicator`` rules apply).
+    """
+
     def __init__(self, text="", parent=None):
         super().__init__("", parent)  # Keep native text empty
         self._rich_text = text
+        self.setAttribute(Qt.WA_Hover, True)
+        self.toggled.connect(self.update)
 
     def setText(self, text: str):
         self._rich_text = text
@@ -114,6 +124,14 @@ class RichCheckBox(QCheckBox):
     def text(self) -> str:
         return self._rich_text
 
+    def hitButton(self, pos) -> bool:
+        return self.rect().contains(pos)
+
+    def changeEvent(self, event):
+        if event.type() in (QEvent.EnabledChange, QEvent.StyleChange):
+            self.update()
+        super().changeEvent(event)
+
     def _doc(self) -> QTextDocument:
         """Build a QTextDocument from the rich text."""
         doc = QTextDocument()
@@ -121,29 +139,25 @@ class RichCheckBox(QCheckBox):
         doc.setHtml(self._rich_text)
         return doc
 
+    def _metrics(self, opt):
+        style = self.style()
+        return (style.pixelMetric(QStyle.PM_IndicatorWidth, opt, self),
+                style.pixelMetric(QStyle.PM_IndicatorHeight, opt, self),
+                style.pixelMetric(QStyle.PM_CheckBoxLabelSpacing, opt, self))
+
     def sizeHint(self) -> QSize:
         doc = self._doc()
-        # Ideal (unconstrained) size of the HTML content
         doc.setTextWidth(-1)
         text_size = doc.size()
-
         opt = QStyleOptionButton()
         self.initStyleOption(opt)
-
-        # Width of the native checkbox indicator
-        indicator_w = self.style().pixelMetric(
-            QStyle.PM_IndicatorWidth, opt, self
-        )
-        spacing = self.style().pixelMetric(
-            QStyle.PM_CheckBoxLabelSpacing, opt, self
-        )
-
-        w = indicator_w + spacing + int(text_size.width())
-        h = max(
-            self.style().pixelMetric(QStyle.PM_IndicatorHeight, opt, self),
-            int(text_size.height()),
-        )
+        ind_w, ind_h, spacing = self._metrics(opt)
+        w = ind_w + spacing + int(text_size.width())
+        h = max(ind_h, int(text_size.height()))
         return QSize(w + 4, h + 4)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -151,30 +165,25 @@ class RichCheckBox(QCheckBox):
 
         opt = QStyleOptionButton()
         self.initStyleOption(opt)
-
-        # --- 1. Draw ONLY the checkbox indicator (no text) ---
         opt.text = ""
-        indicator_rect = self.style().subElementRect(
-            QStyle.SE_CheckBoxIndicator, opt, self
-        )
-        opt.rect = indicator_rect
-        self.style().drawControl(QStyle.CE_CheckBox, opt, painter, self)
+        ind_w, ind_h, spacing = self._metrics(opt)
 
-        # --- 2. Draw rich text with QTextDocument ---
-        indicator_w = self.style().pixelMetric(QStyle.PM_IndicatorWidth, opt, self)
-        spacing = self.style().pixelMetric(QStyle.PM_CheckBoxLabelSpacing, opt, self)
-
-        text_x = indicator_w + spacing
-        text_y = (self.height() - int(self._doc().size().height())) // 2
-
-        painter.save()
-        painter.translate(QPoint(text_x, text_y))
+        # Indicator: drawn as a primitive in its own rect.  (Drawing the whole
+        # CE_CheckBox into an already-offset rect shifted it a second time.)
+        opt.rect = QRect(0, (self.height() - ind_h) // 2, ind_w, ind_h)
+        self.style().drawPrimitive(QStyle.PE_IndicatorCheckBox, opt, painter, self)
 
         doc = self._doc()
-        doc.setTextWidth(self.width() - text_x)
+        text_x = ind_w + spacing
+        doc.setTextWidth(max(1, self.width() - text_x))
+        text_y = (self.height() - int(doc.size().height())) // 2
+        painter.save()
+        painter.translate(QPoint(text_x, text_y))
+        if not self.isEnabled():
+            painter.setOpacity(0.4)
         doc.drawContents(painter)
-
         painter.restore()
+        painter.end()
 
 #=================Percentage-bar widget (for OutputDock)==============================================
 """
@@ -337,15 +346,21 @@ class CustomRadioButton(QRadioButton):
     def __init__(self, text="", parent=None):
         super().__init__("", parent)   # always pass empty string to Qt
         self._rich_text = text         # store our own text (may contain HTML)
-        self.setStyleSheet("""
-            QRadioButton::indicator {
-                width: 0px;
-                height: 0px;
-                image: none;
-                border: none;
-                background: none;
-            }
-        """)
+        # The whole button is painted in paintEvent, so no per-widget QSS is
+        # needed (the old one zeroed the native indicator, which also changed
+        # Qt's click rect so the label was not reliably clickable).
+        self.setAttribute(Qt.WA_Hover, True)   # repaint on enter/leave
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.toggled.connect(self.update)      # never show a stale state
+
+    def hitButton(self, pos) -> bool:
+        """Circle AND label both select the button, on every platform style."""
+        return self.rect().contains(pos)
+
+    def changeEvent(self, event):
+        if event.type() in (QEvent.EnabledChange, QEvent.StyleChange):
+            self.update()
+        super().changeEvent(event)
  
     # ── Public text API (mirrors QAbstractButton) ────────────────────────────
  
@@ -383,9 +398,11 @@ class CustomRadioButton(QRadioButton):
         circle_rect = QRect(offset, cy - s // 2, s, s)
  
         # ── Circle ───────────────────────────────────────────────────────────
+        enabled = self.isEnabled()
         if self.isChecked():
-            painter.setBrush(QColor("#2e7d32"))
-            painter.setPen(QPen(QColor("#2e7d32"), pw))
+            fill = QColor("#2e7d32") if enabled else QColor("#9e9e9e")
+            painter.setBrush(fill)
+            painter.setPen(QPen(fill, pw))
             painter.drawEllipse(circle_rect)
  
             d = self.DOT_SIZE
@@ -399,10 +416,17 @@ class CustomRadioButton(QRadioButton):
             painter.drawEllipse(dot_rect)
  
         else:
-            painter.setBrush(QColor("#ffffff"))
-            border = QColor("#2e7d32") if self.underMouse() else QColor("#9e9e9e")
+            painter.setBrush(QColor("#ffffff") if enabled else QColor("#ececec"))
+            border = QColor("#2e7d32") if (enabled and self.underMouse()) else QColor("#757575")
+            if not enabled:
+                border = QColor("#c8c8c8")
             painter.setPen(QPen(border, pw))
             painter.drawEllipse(circle_rect)
+
+        if self.hasFocus() and enabled:          # keyboard focus ring
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor("#90AF13"), 1, Qt.DotLine))
+            painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 3, 3)
  
         # ── Text ─────────────────────────────────────────────────────────────
         text_x = offset + s + self.SPACING

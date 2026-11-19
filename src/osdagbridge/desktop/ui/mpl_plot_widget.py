@@ -86,11 +86,15 @@ class PlotTitleOverlay(QFrame):
         self.title_label.setObjectName("plotTitle")
         self.title_label.setTextFormat(Qt.RichText)
         self.title_label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.title_label.setWordWrap(True)          # wrap instead of being clipped
+        self.title_label.setMinimumWidth(0)
         layout.addWidget(self.title_label)
 
         self.subtitle_label = QLabel()
         self.subtitle_label.setObjectName("plotSubtitle")
         self.subtitle_label.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        self.subtitle_label.setWordWrap(True)
+        self.subtitle_label.setMinimumWidth(0)
         layout.addWidget(self.subtitle_label)
 
     def update_text(self, title: str, subtitle: str = ""):
@@ -135,7 +139,31 @@ class SummaryOverlay(QFrame):
         self.text_label = QLabel()
         self.text_label.setTextFormat(Qt.RichText)
         self.text_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
-        layout.addWidget(self.text_label)
+
+        # Scrollable, so a long table (e.g. 21 transverse lines) can never grow
+        # past the plot area; see fit_to().
+        self._scroll = QScrollArea()
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setWidgetResizable(False)
+        self._scroll.setStyleSheet(
+            "QScrollArea { background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+            "QScrollBar:vertical { width: 8px; background: transparent; }"
+            "QScrollBar::handle:vertical { background: rgba(255,255,255,90); border-radius: 4px; min-height: 20px; }"
+            "QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }"
+            "QScrollBar:horizontal { height: 8px; background: transparent; }"
+            "QScrollBar::handle:horizontal { background: rgba(255,255,255,90); border-radius: 4px; min-width: 20px; }")
+        self._scroll.setWidget(self.text_label)
+        layout.addWidget(self._scroll)
+
+    def fit_to(self, canvas_width: int, canvas_height: int, x: int = 15, y: int = 45):
+        """Size/position the HUD so it always stays inside the plot area."""
+        self.text_label.adjustSize()
+        want_w = self.text_label.width() + 10
+        want_h = self.text_label.height() + 10
+        max_w = max(120, int(canvas_width * 0.55) - x)
+        max_h = max(60, canvas_height - y - 10)
+        self.setGeometry(x, y, min(want_w, max_w), min(want_h, max_h))
 
     def update_data(self, summary_data, unit=""):
         title = "Extreme Values Summary"
@@ -157,7 +185,10 @@ class SummaryOverlay(QFrame):
             hud_text += f"<b>{g_str}</b> | <span style='color: #FF4136;'>{max_str}</span> | <span style='color: #00E5FF;'>{min_str}</span><br>"
 
         self.text_label.setText(hud_text)
-        self.adjustSize()
+        self.text_label.adjustSize()
+        parent = self.parentWidget()
+        if parent is not None:
+            self.fit_to(parent.width(), parent.height())
 
 
 # =============================================================================
@@ -176,6 +207,13 @@ class MplPlotWidget(QWidget):
         self._transverse_elements = {}
         self._output_dock = None
         self._summary_data = {}
+        self._dock_connections = []          # (signal, slot) pairs made by link_output_dock
+
+        # Coalesces the several signals one user action can raise into one redraw.
+        self._update_timer = QTimer(self)
+        self._update_timer.setSingleShot(True)
+        self._update_timer.setInterval(0)
+        self._update_timer.timeout.connect(self._run_scheduled_update)
 
         # Display States
         self._grillage_mode = False
@@ -359,54 +397,13 @@ class MplPlotWidget(QWidget):
             self._navcube.hide()
 
     def _disconnect_output_dock_signals(self):
-        """Disconnect all signals wired in link_output_dock() to prevent dangling refs."""
-        if self._output_dock is None:
-            return
-        from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
-
-        combo_lc = self._output_dock.output_widget.findChild(QComboBox, "analysis.load_combination")
-        if combo_lc is not None:
+        """Undo every connection made in link_output_dock() (safe to call repeatedly)."""
+        for signal, slot in self._dock_connections:
             try:
-                combo_lc.currentTextChanged.disconnect(self.update_plot)
-            except RuntimeError:
-                pass
-
-        combo_member = self._output_dock.output_widget.findChild(QComboBox, "analysis.member")
-        if combo_member is not None:
-            try:
-                combo_member.currentTextChanged.disconnect(self.update_plot)
-            except RuntimeError:
-                pass
-
-        for rb in self._output_dock.output_widget.findChildren(CustomRadioButton):
-            if rb.text() in _RICH_LABEL_TO_FORCE:
-                try:
-                    rb.toggled.disconnect(self.update_plot)
-                except RuntimeError:
-                    pass
-
-        for cb in self._output_dock.output_widget.findChildren(QCheckBox):
-            text = cb.text().strip().lower()
-            if "summary" in text:
-                try:
-                    cb.toggled.disconnect(self._on_summary_toggled)
-                except RuntimeError:
-                    pass
-            elif "max" in text:
-                try:
-                    cb.toggled.disconnect(self._on_max_toggled)
-                except RuntimeError:
-                    pass
-            elif "min" in text:
-                try:
-                    cb.toggled.disconnect(self._on_min_toggled)
-                except RuntimeError:
-                    pass
-            elif "all" in text:
-                try:
-                    cb.toggled.disconnect(self._on_all_vals_toggled)
-                except RuntimeError:
-                    pass
+                signal.disconnect(slot)
+            except (RuntimeError, TypeError):
+                pass                      # widget already destroyed / already disconnected
+        self._dock_connections = []
 
     def setup(self, ds_all, loadcases: list, nodes: dict, members: dict,
               edge_dist: float = 0.0, transverse_elements=None):
@@ -430,11 +427,45 @@ class MplPlotWidget(QWidget):
             # off the edges of the screen, maximizing the bridge resolution.
             self._fig.subplots_adjust(left=-0.05, right=1.05, bottom=-0.05, top=1.05)
 
-    def link_output_dock(self, output_dock):
-        self._output_dock = output_dock
+    # -- dock wiring ---------------------------------------------------------
 
-        # 1. Connect Load Combinations
-        combo_lc = output_dock.output_widget.findChild(QComboBox, "analysis.load_combination")
+    def _dock_connect(self, signal, slot):
+        """Connect and remember, so every connection can be undone exactly once."""
+        signal.connect(slot)
+        self._dock_connections.append((signal, slot))
+
+    def _schedule_update(self, *_args):
+        """Redraw once, after the event loop has repainted the control that was clicked.
+
+        Re-plotting a 3D figure takes a noticeable fraction of a second.  Doing it
+        inside the ``toggled`` / ``currentTextChanged`` slot blocked the repaint of
+        the very radio button or checkbox the user had just clicked, and a radio
+        change (old button off + new button on) redrew twice.
+        """
+        self._update_timer.start()
+
+    def _run_scheduled_update(self):
+        self.update_plot()
+
+    def _on_force_radio_toggled(self, checked):
+        if checked:                      # ignore the "old button switched off" signal
+            self._schedule_update()
+
+    def _on_member_changed(self, _text=""):
+        if self._grillage_mode:
+            self._on_grillage_toggled(self._grillage_mode)
+        else:
+            self._schedule_update()
+
+    def link_output_dock(self, output_dock):
+        # Linking can happen again after a re-run: drop the old connections first
+        # so no slot ever fires twice.
+        self._disconnect_output_dock_signals()
+        self._output_dock = output_dock
+        widget = output_dock.output_widget
+
+        # 1. Load combinations (selection survives a refresh when still available)
+        combo_lc = widget.findChild(QComboBox, "analysis.load_combination")
         if combo_lc is not None:
             # Hide the per-position moving load cases ("Moving Case1", ...) —
             # they are numerous and clutter the dropdown. The dataset still
@@ -443,51 +474,60 @@ class MplPlotWidget(QWidget):
                 lc for lc in self._loadcases
                 if not str(lc).strip().lower().startswith("moving case")
             ]
+            previous = combo_lc.currentText()
             combo_lc.blockSignals(True)
             combo_lc.clear()
             combo_lc.addItems(visible_loadcases)
+            combo_lc.setCurrentIndex(max(0, combo_lc.findText(previous)))
             combo_lc.blockSignals(False)
             combo_lc.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             combo_lc.setMinimumContentsLength(12)
-            combo_lc.currentTextChanged.connect(self.update_plot)
+            self._dock_connect(combo_lc.currentTextChanged, self._schedule_update)
 
-        # Connect Analysis Member Dropdown
-        combo_member = output_dock.output_widget.findChild(QComboBox, "analysis.member")
+        # 2. Member dropdown
+        combo_member = widget.findChild(QComboBox, "analysis.member")
         if combo_member is not None:
-            combo_member.currentTextChanged.connect(self.update_plot)
-            # Make sure it fires an update if changed from UI, since grillage might be active
-            combo_member.currentTextChanged.connect(lambda text: self._on_grillage_toggled(self._grillage_mode) if self._grillage_mode else None)
+            self._dock_connect(combo_member.currentTextChanged, self._on_member_changed)
 
-        # 2. Connect Force Radios
+        # 3. Force / moment / displacement radios.  Keep the user's choice if
+        #    there is one; fall back to the default only when nothing is selected.
         from osdagbridge.desktop.ui.utils.custom_widgets import CustomRadioButton
         force_rbs = [
-            rb for rb in output_dock.output_widget.findChildren(CustomRadioButton)
+            rb for rb in widget.findChildren(CustomRadioButton)
             if rb.text() in _RICH_LABEL_TO_FORCE
         ]
+        if not any(rb.isChecked() for rb in force_rbs):
+            for rb in force_rbs:
+                if rb.text() == _DEFAULT_FORCE_LABEL:
+                    rb.setChecked(True)
         for rb in force_rbs:
-            rb.setChecked(rb.text() == _DEFAULT_FORCE_LABEL)
-            rb.toggled.connect(self.update_plot)
+            self._dock_connect(rb.toggled, self._on_force_radio_toggled)
 
-        # Create placeholders to store the checkboxes
+        # 4. Display-value checkboxes (matched on their exact label)
         self._cb_max = None
         self._cb_min = None
-
-        for cb in output_dock.output_widget.findChildren(QCheckBox):
+        cb_all = None
+        for cb in widget.findChildren(QCheckBox):
             text = cb.text().strip().lower()
-            if "summary" in text:
-                cb.toggled.connect(self._on_summary_toggled)
+            if text == "summary":
+                self._dock_connect(cb.toggled, self._on_summary_toggled)
                 self._is_summary_checked = cb.isChecked()
-            elif "max" in text:
-                self._cb_max = cb  # Store the reference
-                cb.toggled.connect(self._on_max_toggled)
+            elif text == "max":
+                self._cb_max = cb
+                self._dock_connect(cb.toggled, self._on_max_toggled)
                 self._show_max = cb.isChecked()
-            elif "min" in text:
-                self._cb_min = cb  # Store the reference
-                cb.toggled.connect(self._on_min_toggled)
+            elif text == "min":
+                self._cb_min = cb
+                self._dock_connect(cb.toggled, self._on_min_toggled)
                 self._show_min = cb.isChecked()
-            elif "all" in text:
-                cb.toggled.connect(self._on_all_vals_toggled)
+            elif text == "all":
+                cb_all = cb
+                self._dock_connect(cb.toggled, self._on_all_vals_toggled)
                 self._show_all_vals = cb.isChecked()
+        if cb_all is not None and cb_all.isChecked():     # Max/Min are moot while All is on
+            for cb in (self._cb_max, self._cb_min):
+                if cb is not None:
+                    cb.setEnabled(False)
 
         self.update_plot()
 
@@ -798,7 +838,8 @@ class MplPlotWidget(QWidget):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if self._summary_overlay:
-            self._summary_overlay.move(15, 45) # Keep HUD floating safely under the toolbar
+            # keep the HUD under the toolbar and inside the plot, scrolling if needed
+            self._summary_overlay.fit_to(self._canvas.width(), self._canvas.height())
         self._position_title_overlay()
 
     # private helpers
@@ -898,11 +939,22 @@ class MplPlotWidget(QWidget):
             fig.set_size_inches(width / fig.dpi, height / fig.dpi, forward=False)
 
     def _position_title_overlay(self):
+        """Centre the title in the canvas, wrapping it and keeping it clear of the nav cube."""
         if not hasattr(self, "_title_overlay"):
             return
-        height = 58 if self._title_overlay.subtitle_label.isVisible() else 28
-        self._title_overlay.setGeometry(0, 18, self._canvas.width(), height)
-        self._title_overlay.raise_()
+        canvas_w = max(1, self._canvas.width())
+        margin = 8
+        if hasattr(self, "_navcube"):
+            # reserve the same width on both sides so the text stays centred
+            margin = max(margin, self._navcube.width() + 16)
+        if canvas_w < 3 * margin:              # very narrow plot: use what there is
+            margin = 8
+        width = max(1, canvas_w - 2 * margin)
+        overlay = self._title_overlay
+        overlay.setFixedWidth(width)
+        height = max(28, overlay.layout().totalHeightForWidth(width))
+        overlay.setGeometry(margin, 18, width, height)
+        overlay.raise_()
 
     def _store_orig_limits(self):
         pass # Not needed for Uniform Render Zoom

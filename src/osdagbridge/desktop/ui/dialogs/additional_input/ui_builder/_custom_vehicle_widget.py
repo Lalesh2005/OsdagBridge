@@ -197,4 +197,5 @@ class CustomVehicleWidget(QWidget):
             data[idx]["included"] = checked
             self._data = data
             if self._ai:
+                self._ai._mark_modified()  # list is edited in place, so a value comparison cannot see this
                 self._ai._on_field_edited(self._field_id, data)

@@ -26,6 +26,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QSizePolicy,
     QPushButton, QGroupBox, QCheckBox, QScrollArea, QFrame, QComboBox,
 )
@@ -156,7 +157,9 @@ class OutputDock(QWidget):
     def _build_scroll_area(self) -> QScrollArea:
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # Scroll in both directions *when needed*: a dock narrower than its
+        # content must never clip controls with no way to reach them.
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scroll_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.scroll_area.setStyleSheet("""
@@ -167,6 +170,11 @@ class OutputDock(QWidget):
             QScrollArea QScrollBar::handle:vertical:hover { background:#a0a0a0; }
             QScrollArea QScrollBar::add-line:vertical,
             QScrollArea QScrollBar::sub-line:vertical { border:none; background:none; }
+            QScrollArea QScrollBar:horizontal { border:none; background:#f0f0f0; height:8px; }
+            QScrollArea QScrollBar::handle:horizontal { background:#c0c0c0; border-radius:4px; min-width:20px; }
+            QScrollArea QScrollBar::handle:horizontal:hover { background:#a0a0a0; }
+            QScrollArea QScrollBar::add-line:horizontal,
+            QScrollArea QScrollBar::sub-line:horizontal { border:none; background:none; }
         """)
 
         self.output_widget = QWidget()
@@ -517,7 +525,16 @@ class OutputDock(QWidget):
                     all_rbs.append(rb)
                     grid.addWidget(rb, row, col, alignment=Qt.AlignCenter)
     
-        outer.addLayout(grid)    
+        # One explicit exclusive group per grid.  Relying on Qt's implicit
+        # "same parent" auto-exclusivity lets unrelated radios that happen to
+        # share a parent steal each other's selection.
+        group = QButtonGroup(outer)
+        group.setExclusive(bool(meta.get("exclusive", True)))
+        for rb in all_rbs:
+            group.addButton(rb)
+        setattr(self, f"_radio_group_{key.replace('.', '_')}", group)   # keep alive
+
+        outer.addLayout(grid)
         return outer
 
     def _make_checkbox_row(self, key: str, label: str, values, meta: dict) -> QHBoxLayout:
@@ -805,6 +822,7 @@ class OutputDock(QWidget):
         for key in (KEY_ANALYSIS_LOAD_COMBINATION, KEY_OUTPUT_DOCK_LOAD_COMBINATION):
             combo = self._w(key)
             if combo is not None:
+                previous = combo.currentText()
                 combo.blockSignals(True)
                 combo.clear()
                 combo.addItems(loadcases)
@@ -814,7 +832,8 @@ class OutputDock(QWidget):
                 # (which plots real dataset load cases).
                 if key == KEY_OUTPUT_DOCK_LOAD_COMBINATION:
                     combo.addItem("Design Envelope")
-                combo.setCurrentIndex(0)  # first real load case is default
+                # first real load case is the default; an earlier choice survives a refresh
+                combo.setCurrentIndex(max(0, combo.findText(previous)))
                 combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
                 combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
                 combo.blockSignals(False)
@@ -823,10 +842,6 @@ class OutputDock(QWidget):
         """Populate the Girder Design Member dropdown after design completes."""
         if not self.backend or not hasattr(self.backend, "input_dict"):
             return
-        combo = self._w(KEY_OUTPUT_DOCK_MEMBER_ID)
-        if combo is None:
-            return
-
         n_girders = int(self.backend.input_dict.get(KEY_TS_NO_OF_GIRDERS, 1))
 
         # Currently 1 member per girder (M1 only).
@@ -849,10 +864,11 @@ class OutputDock(QWidget):
         # 1. Update Design Girder dropdown
         combo_design = self._w(KEY_OUTPUT_DOCK_MEMBER_ID)
         if combo_design is not None:
+            previous = combo_design.currentText()
             combo_design.blockSignals(True)
             combo_design.clear()
             combo_design.addItems(items)
-            combo_design.setCurrentIndex(0)
+            combo_design.setCurrentIndex(max(0, combo_design.findText(previous)))
             combo_design.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo_design.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             combo_design.blockSignals(False)
@@ -863,12 +879,13 @@ class OutputDock(QWidget):
         )
         combo_analysis = self._w(KEY_ANALYSIS_MEMBER)
         if combo_analysis is not None:
+            previous = combo_analysis.currentText()      # keep the user's choice on refresh
             combo_analysis.blockSignals(True)
             combo_analysis.clear()
             # "Transverse Members" = end diaphragms + intermediate cross
             # bracings, one unified entry after the girders.
             combo_analysis.addItems(["All"] + items + [TRANSVERSE_MEMBERS_LABEL])
-            combo_analysis.setCurrentIndex(0)
+            combo_analysis.setCurrentIndex(max(0, combo_analysis.findText(previous)))
             combo_analysis.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             combo_analysis.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             combo_analysis.blockSignals(False)

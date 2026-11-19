@@ -1660,8 +1660,7 @@ def build_figure_transverse(ds, key, nodes, members, transverse_elements,
         lines = build_transverse_lines(nodes, members, tags, tag_group)
         if is_force:
             comp_i, comp_j = FORCE_MAP[key]
-            data = extract_transverse_force_profiles(
-                ds, lines, comp_i, comp_j, negate_j=key.startswith("F"))
+            data = extract_transverse_force_profiles(ds, lines, comp_i, comp_j)
         else:
             data = extract_transverse_displacement_profiles(ds, lines, DISP_MAP[key])
     except TransverseResultsError as exc:
@@ -1672,6 +1671,7 @@ def build_figure_transverse(ds, key, nodes, members, transverse_elements,
 
     profiles, unit = data["profiles"], data["unit"]
     summary_data = data["summary"]
+    peak, is_zero = data["peak"], data["is_zero"]
 
     is_moment = is_force and not key.startswith("F")
     if is_disp:
@@ -1810,11 +1810,27 @@ def build_figure_transverse(ds, key, nodes, members, transverse_elements,
     ax.set_zlabel(f"{label} ({unit})", fontsize=10, labelpad=8)
     _set_value_axis_tick_formatter(ax, v_scale)
     zmin, zmax = min(0.0, global_vmin), max(0.0, global_vmax)
+    # The vertical extent follows the data, so noise-level results would be blown
+    # up to full height.  Keep at least one unit (1 kN / 1 kNm / 1 mm) of
+    # headroom each way so such a diagram stays flat, as it is.
+    min_half_span = max(v_scale, 1e-6)
+    zmin, zmax = min(zmin, -min_half_span), max(zmax, min_half_span)
     pad = max(1e-6, 0.05 * max(1e-9, zmax - zmin))
     ax.set_zlim(zmin - pad, zmax + pad)
     ax.set_box_aspect([x_range, z_range, (x_range * 0.30) * max(v_scale, 1e-6)])
     ax.yaxis.set_major_locator(MaxNLocator(nbins=4, steps=[1, 2, 2.5, 5, 10]))
     ax.set_title(title, fontsize=12, fontweight="bold", pad=12)
+    if is_zero:
+        # Say so on the plot - a flat line alone reads like missing data.
+        fig.text(0.5, 0.5,
+                 f"{label} is zero in all transverse members for this load case"
+                 if peak == 0.0 else
+                 f"{label} is negligible in all transverse members for this load case "
+                 f"(max |{label}| = {peak:.1e} {unit})",
+                 ha="center", va="center", fontsize=11, color="#B26A00",
+                 bbox=dict(facecolor="#FFF8E1", edgecolor="#FFB300",
+                           boxstyle="round,pad=0.4", alpha=0.95),
+                 gid="transverse_notice")
     fig._eng_scale = v_scale
     ax.view_init(elev=DEFAULT_ELEV, azim=DEFAULT_AZIM)
     for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
